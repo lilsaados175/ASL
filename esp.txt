@@ -1,0 +1,94 @@
+import cv2
+import numpy as np
+import math
+import pyttsx3
+from cvzone.HandTrackingModule import HandDetector
+from cvzone.ClassificationModule import Classifier
+
+# Initialize TTS
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)
+last_spoken = ""
+
+# ESP32-CAM stream (works with QVGA MJPEG)
+stream_url = "http://192.168.1.11:81/stream"  # <-- Replace with your IP
+cap = cv2.VideoCapture(stream_url)
+
+if not cap.isOpened():
+    print("Error: Could not open ESP32-CAM stream.")
+    exit()
+
+# Init hand detector and classifier
+detector = HandDetector(maxHands=1)
+classifier = Classifier("Model/keras_model.h5", "Model/labels.txt")
+
+offset = 20
+imgSize = 300
+labels = ["A", "B", "C", "D", "E", "Y", "Z"]
+
+while True:
+    success, img = cap.read()
+    if not success or img is None:
+        print("Stream frame read failed.")
+        continue
+
+    imgOutput = img.copy()
+    hands, img = detector.findHands(img)
+
+    if hands:
+        hand = hands[0]
+        x, y, w, h = hand['bbox']
+
+        y1, y2 = max(0, y - offset), min(img.shape[0], y + h + offset)
+        x1, x2 = max(0, x - offset), min(img.shape[1], x + w + offset)
+        imgCrop = img[y1:y2, x1:x2]
+
+        if imgCrop.size == 0:
+            continue
+
+        imgWhite = np.ones((imgSize, imgSize, 3), np.uint8) * 255
+        aspectRatio = h / w
+
+        try:
+            if aspectRatio > 1:
+                k = imgSize / h
+                wCal = math.ceil(k * w)
+                imgResize = cv2.resize(imgCrop, (wCal, imgSize))
+                wGap = math.ceil((imgSize - wCal) / 2)
+                imgWhite[:, wGap:wGap + imgResize.shape[1]] = imgResize
+            else:
+                k = imgSize / w
+                hCal = math.ceil(k * h)
+                imgResize = cv2.resize(imgCrop, (imgSize, hCal))
+                hGap = math.ceil((imgSize - hCal) / 2)
+                imgWhite[hGap:hGap + imgResize.shape[0], :] = imgResize
+
+            prediction, index = classifier.getPrediction(imgWhite, draw=False)
+            letter = labels[index]
+
+            if letter != last_spoken:
+                engine.say(letter)
+                engine.runAndWait()
+                last_spoken = letter
+
+            print("Prediction:", prediction, "Index:", index, "Letter:", letter)
+
+            # Draw annotations
+            cv2.rectangle(imgOutput, (x1, y1 - 50), (x1 + 90, y1), (255, 0, 255), cv2.FILLED)
+            cv2.putText(imgOutput, letter, (x1 + 5, y1 - 10), cv2.FONT_HERSHEY_COMPLEX, 1.7, (255, 255, 255), 2)
+            cv2.rectangle(imgOutput, (x1, y1), (x2, y2), (255, 0, 255), 4)
+
+            # Show processed images
+            cv2.imshow("ImageCrop", imgCrop)
+            cv2.imshow("ImageWhite", imgWhite)
+
+        except Exception as e:
+            print("Error:", e)
+
+    cv2.imshow("ESP32-CAM Stream", imgOutput)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
